@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -20,48 +21,93 @@ func run() error {
 	}
 
 	fmt.Printf("pid: %d\n", os.Getpid())
-	cmds := spawn(os.Args[1], 50)
+	clients := spawn(os.Args[1], 50)
 
-	for _, c := range cmds {
-		if err := c.Wait(); err != nil {
-			return fmt.Errorf("cmd wait: %w", err)
-		}
+	// TODO: Use updated data...
+	if _, err := sendAndReceive("some data", clients); err != nil {
+		return err
 	}
+	stop(clients)
+
 	return nil
 }
 
-func spawn(binaryPath string, n int) []*exec.Cmd {
-	cmds := make([]*exec.Cmd, n)
+func spawn(binaryPath string, n int) []*client {
+	clients := make([]*client, n)
 	for i := 0; i < n; i++ {
-		cmds[i] = exec.Command(binaryPath)
+		clients[i] = newClient(binaryPath)
 	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		cmd := cmds[i]
+		client := clients[i]
 		go func() {
-			if err := start(cmd); err != nil {
+			if err := client.start(); err != nil {
 				panic("TODO")
 			}
 			wg.Done()
 		}()
 	}
 	wg.Wait()
-	return cmds
+	return clients
 }
 
-func start(cmd *exec.Cmd) error {
-	_, err := cmd.StdoutPipe()
+func sendAndReceive(data string, clients []*client) ([]string, error) {
+	// We would parallelize this too, but keeping it simple for brevity.
+	responses := make([]string, len(clients))
+	for i, c := range clients {
+		if _, err := c.stdin.Write([]byte(data)); err != nil {
+			return nil, err
+		}
+		resp := make([]byte, 64)
+		if _, err := c.stdout.Read(resp); err != nil {
+			return nil, err
+		}
+		responses[i] = string(resp)
+	}
+	return responses, nil
+}
+
+func stop(clients []*client) error {
+	// We would parallelize this too, but keeping it simple for brevity.
+	for _, c := range clients {
+		if err := c.stop(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type client struct {
+	cmd *exec.Cmd
+
+	stdout io.ReadCloser
+	stdin  io.WriteCloser
+}
+
+func newClient(binary string) *client {
+	return &client{
+		cmd: exec.Command(binary),
+	}
+}
+
+func (c *client) start() error {
+	var err error
+	c.stdout, err = c.cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("create stdout pipe: %w", err)
 	}
-	_, err = cmd.StdinPipe()
+	c.stdin, err = c.cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("create stdin pipe: %w", err)
 	}
-	if err = cmd.Start(); err != nil {
+	if err = c.cmd.Start(); err != nil {
 		return fmt.Errorf("run cmd: %w", err)
 	}
 	return nil
+}
+
+func (c *client) stop() error {
+	return c.cmd.Wait()
 }
